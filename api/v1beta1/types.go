@@ -471,7 +471,7 @@ const (
 )
 
 // IdentityType represents different types of identities.
-// +kubebuilder:validation:Enum=ServicePrincipal;UserAssignedMSI;ManualServicePrincipal;ServicePrincipalCertificate
+// +kubebuilder:validation:Enum=ServicePrincipal;ManualServicePrincipal;UserAssignedMSI
 type IdentityType string
 
 const (
