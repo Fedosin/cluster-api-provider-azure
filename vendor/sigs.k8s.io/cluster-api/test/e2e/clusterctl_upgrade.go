@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,9 +31,15 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/discovery"
 	"k8s.io/utils/pointer"
-	clusterv1old "sigs.k8s.io/cluster-api/api/v1alpha3"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	clusterv1alpha3 "sigs.k8s.io/cluster-api/api/v1alpha3"
+	clusterv1alpha4 "sigs.k8s.io/cluster-api/api/v1alpha4"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/config"
 	"sigs.k8s.io/cluster-api/test/e2e/internal/log"
@@ -42,7 +47,6 @@ import (
 	"sigs.k8s.io/cluster-api/test/framework/bootstrap"
 	"sigs.k8s.io/cluster-api/test/framework/clusterctl"
 	"sigs.k8s.io/cluster-api/util"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -64,6 +68,7 @@ type ClusterctlUpgradeSpecInput struct {
 	// provider contract to use to initialise the secondary management cluster, e.g. `v1alpha3`
 	InitWithProvidersContract string
 	SkipCleanup               bool
+	ControlPlaneWaiters       clusterctl.ControlPlaneWaiters
 	PreInit                   func(managementClusterProxy framework.ClusterProxy)
 	PreUpgrade                func(managementClusterProxy framework.ClusterProxy)
 	PostUpgrade               func(managementClusterProxy framework.ClusterProxy)
@@ -162,6 +167,7 @@ func ClusterctlUpgradeSpec(ctx context.Context, inputGetter func() ClusterctlUpg
 				ControlPlaneMachineCount: pointer.Int64Ptr(1),
 				WorkerMachineCount:       pointer.Int64Ptr(1),
 			},
+			ControlPlaneWaiters:          input.ControlPlaneWaiters,
 			WaitForClusterIntervals:      input.E2EConfig.GetIntervals(specName, "wait-cluster"),
 			WaitForControlPlaneIntervals: input.E2EConfig.GetIntervals(specName, "wait-control-plane"),
 			WaitForMachineDeployments:    input.E2EConfig.GetIntervals(specName, "wait-worker-nodes"),
@@ -188,7 +194,7 @@ func ClusterctlUpgradeSpec(ctx context.Context, inputGetter func() ClusterctlUpg
 		// Download the older clusterctl version to be used for setting up the management cluster to be upgraded
 
 		log.Logf("Downloading clusterctl binary from %s", clusterctlBinaryURL)
-		clusterctlBinaryPath := downloadToTmpFile(clusterctlBinaryURL)
+		clusterctlBinaryPath := downloadToTmpFile(ctx, clusterctlBinaryURL)
 		defer os.Remove(clusterctlBinaryPath) // clean up
 
 		err := os.Chmod(clusterctlBinaryPath, 0744) //nolint:gosec
@@ -273,7 +279,7 @@ func ClusterctlUpgradeSpec(ctx context.Context, inputGetter func() ClusterctlUpg
 		By("Waiting for the machines to exists")
 		Eventually(func() (int64, error) {
 			var n int64
-			machineList := &clusterv1old.MachineList{}
+			machineList := &clusterv1alpha3.MachineList{}
 			if err := managementClusterProxy.GetClient().List(ctx, machineList, client.InNamespace(testNamespace.Name), client.MatchingLabels{clusterv1.ClusterLabelName: workLoadClusterName}); err == nil {
 				for _, machine := range machineList.Items {
 					if machine.Status.NodeRef != nil {
@@ -291,6 +297,18 @@ func ClusterctlUpgradeSpec(ctx context.Context, inputGetter func() ClusterctlUpg
 			input.PreUpgrade(managementClusterProxy)
 		}
 
+		// Get the workloadCluster before the management cluster is upgraded to make sure that the upgrade did not trigger
+		// any unexpected rollouts.
+		preUpgradeMachineList := &unstructured.UnstructuredList{}
+		preUpgradeMachineList.SetGroupVersionKind(clusterv1alpha3.GroupVersion.WithKind("MachineList"))
+		err = managementClusterProxy.GetClient().List(
+			ctx,
+			preUpgradeMachineList,
+			client.InNamespace(testNamespace.Name),
+			client.MatchingLabels{clusterv1.ClusterLabelName: workLoadClusterName},
+		)
+		Expect(err).NotTo(HaveOccurred())
+
 		By("Upgrading providers to the latest version available")
 		clusterctl.UpgradeManagementClusterAndWait(ctx, clusterctl.UpgradeManagementClusterAndWaitInput{
 			ClusterctlConfigPath: input.ClusterctlConfigPath,
@@ -305,6 +323,20 @@ func ClusterctlUpgradeSpec(ctx context.Context, inputGetter func() ClusterctlUpg
 			By("Running Post-upgrade steps against the management cluster")
 			input.PostUpgrade(managementClusterProxy)
 		}
+
+		// After the upgrade check that there were no unexpected rollouts.
+		Consistently(func() bool {
+			postUpgradeMachineList := &unstructured.UnstructuredList{}
+			postUpgradeMachineList.SetGroupVersionKind(clusterv1.GroupVersion.WithKind("MachineList"))
+			err = managementClusterProxy.GetClient().List(
+				ctx,
+				postUpgradeMachineList,
+				client.InNamespace(testNamespace.Name),
+				client.MatchingLabels{clusterv1.ClusterLabelName: workLoadClusterName},
+			)
+			Expect(err).NotTo(HaveOccurred())
+			return matchUnstructuredLists(preUpgradeMachineList, postUpgradeMachineList)
+		}, "3m", "30s").Should(BeTrue(), "Machines should remain the same after the upgrade")
 
 		// After upgrading we are sure the version is the latest version of the API,
 		// so it is possible to use the standard helpers
@@ -342,14 +374,20 @@ func ClusterctlUpgradeSpec(ctx context.Context, inputGetter func() ClusterctlUpg
 			if !input.SkipCleanup {
 				switch {
 				case discovery.ServerSupportsVersion(managementClusterProxy.GetClientSet().DiscoveryClient, clusterv1.GroupVersion) == nil:
-					Byf("Deleting all clusters in namespace: %s in management cluster: %s", testNamespace.Name, managementClusterName)
+					Byf("Deleting all %s clusters in namespace %s in management cluster %s", clusterv1.GroupVersion, testNamespace.Name, managementClusterName)
 					framework.DeleteAllClustersAndWait(ctx, framework.DeleteAllClustersAndWaitInput{
 						Client:    managementClusterProxy.GetClient(),
 						Namespace: testNamespace.Name,
 					}, input.E2EConfig.GetIntervals(specName, "wait-delete-cluster")...)
-				case discovery.ServerSupportsVersion(managementClusterProxy.GetClientSet().DiscoveryClient, clusterv1old.GroupVersion) == nil:
-					Byf("Deleting all clusters in namespace: %s in management cluster: %s", testNamespace.Name, managementClusterName)
-					deleteAllClustersAndWaitOldAPI(ctx, framework.DeleteAllClustersAndWaitInput{
+				case discovery.ServerSupportsVersion(managementClusterProxy.GetClientSet().DiscoveryClient, clusterv1alpha4.GroupVersion) == nil:
+					Byf("Deleting all %s clusters in namespace %s in management cluster %s", clusterv1alpha4.GroupVersion, testNamespace.Name, managementClusterName)
+					deleteAllClustersAndWaitV1alpha4(ctx, framework.DeleteAllClustersAndWaitInput{
+						Client:    managementClusterProxy.GetClient(),
+						Namespace: testNamespace.Name,
+					}, input.E2EConfig.GetIntervals(specName, "wait-delete-cluster")...)
+				case discovery.ServerSupportsVersion(managementClusterProxy.GetClientSet().DiscoveryClient, clusterv1alpha3.GroupVersion) == nil:
+					Byf("Deleting all %s clusters in namespace %s in management cluster %s", clusterv1alpha3.GroupVersion, testNamespace.Name, managementClusterName)
+					deleteAllClustersAndWaitV1alpha3(ctx, framework.DeleteAllClustersAndWaitInput{
 						Client:    managementClusterProxy.GetClient(),
 						Namespace: testNamespace.Name,
 					}, input.E2EConfig.GetIntervals(specName, "wait-delete-cluster")...)
@@ -357,16 +395,23 @@ func ClusterctlUpgradeSpec(ctx context.Context, inputGetter func() ClusterctlUpg
 					log.Logf("Management Cluster does not appear to support CAPI resources.")
 				}
 
-				Byf("Deleting cluster %s and %s", testNamespace.Name, managementClusterName)
+				Byf("Deleting cluster %s/%s", testNamespace.Name, managementClusterName)
 				framework.DeleteAllClustersAndWait(ctx, framework.DeleteAllClustersAndWaitInput{
 					Client:    managementClusterProxy.GetClient(),
 					Namespace: testNamespace.Name,
 				}, input.E2EConfig.GetIntervals(specName, "wait-delete-cluster")...)
 
-				Byf("Deleting namespace used for hosting the %q test", specName)
+				Byf("Deleting namespace %s used for hosting the %q test", testNamespace.Name, specName)
 				framework.DeleteNamespace(ctx, framework.DeleteNamespaceInput{
 					Deleter: managementClusterProxy.GetClient(),
 					Name:    testNamespace.Name,
+				})
+
+				Byf("Deleting providers")
+				clusterctl.Delete(ctx, clusterctl.DeleteInput{
+					LogFolder:            filepath.Join(input.ArtifactFolder, "clusters", managementClusterResources.Cluster.Name),
+					ClusterctlConfigPath: input.ClusterctlConfigPath,
+					KubeconfigPath:       managementClusterProxy.GetKubeconfigPath(),
 				})
 			}
 			testCancelWatches()
@@ -377,13 +422,16 @@ func ClusterctlUpgradeSpec(ctx context.Context, inputGetter func() ClusterctlUpg
 	})
 }
 
-func downloadToTmpFile(url string) string {
-	tmpFile, err := ioutil.TempFile("", "clusterctl")
+func downloadToTmpFile(ctx context.Context, url string) string {
+	tmpFile, err := os.CreateTemp("", "clusterctl")
 	Expect(err).ToNot(HaveOccurred(), "failed to get temporary file")
 	defer tmpFile.Close()
 
 	// Get the data
-	resp, err := http.Get(url) //nolint:gosec
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+	Expect(err).ToNot(HaveOccurred(), "failed to get clusterctl: failed to create request")
+
+	resp, err := http.DefaultClient.Do(req)
 	Expect(err).ToNot(HaveOccurred(), "failed to get clusterctl")
 	defer resp.Body.Close()
 
@@ -394,19 +442,19 @@ func downloadToTmpFile(url string) string {
 	return tmpFile.Name()
 }
 
-// deleteAllClustersAndWaitOldAPI deletes all cluster resources in the given namespace and waits for them to be gone using the older API.
-func deleteAllClustersAndWaitOldAPI(ctx context.Context, input framework.DeleteAllClustersAndWaitInput, intervals ...interface{}) {
+// deleteAllClustersAndWaitV1alpha3 deletes all cluster resources in the given namespace and waits for them to be gone using the older API.
+func deleteAllClustersAndWaitV1alpha3(ctx context.Context, input framework.DeleteAllClustersAndWaitInput, intervals ...interface{}) {
 	Expect(ctx).NotTo(BeNil(), "ctx is required for deleteAllClustersAndWaitOldAPI")
 	Expect(input.Client).ToNot(BeNil(), "Invalid argument. input.Client can't be nil when calling deleteAllClustersAndWaitOldAPI")
 	Expect(input.Namespace).ToNot(BeEmpty(), "Invalid argument. input.Namespace can't be empty when calling deleteAllClustersAndWaitOldAPI")
 
-	clusters := getAllClustersByNamespaceOldAPI(ctx, framework.GetAllClustersByNamespaceInput{
+	clusters := getAllClustersByNamespaceV1alpha3(ctx, framework.GetAllClustersByNamespaceInput{
 		Lister:    input.Client,
 		Namespace: input.Namespace,
 	})
 
 	for _, c := range clusters {
-		deleteClusterOldAPI(ctx, deleteClusterOldAPIInput{
+		deleteClusterV1alpha3(ctx, deleteClusterV1alpha3Input{
 			Deleter: input.Client,
 			Cluster: c,
 		})
@@ -414,52 +462,143 @@ func deleteAllClustersAndWaitOldAPI(ctx context.Context, input framework.DeleteA
 
 	for _, c := range clusters {
 		log.Logf("Waiting for the Cluster %s/%s to be deleted", c.Namespace, c.Name)
-		waitForClusterDeletedOldAPI(ctx, waitForClusterDeletedOldAPIInput{
+		waitForClusterDeletedV1alpha3(ctx, waitForClusterDeletedV1alpha3Input{
 			Getter:  input.Client,
 			Cluster: c,
 		}, intervals...)
 	}
 }
 
-// getAllClustersByNamespaceOldAPI returns the list of Cluster objects in a namespace using the older API.
-func getAllClustersByNamespaceOldAPI(ctx context.Context, input framework.GetAllClustersByNamespaceInput) []*clusterv1old.Cluster {
-	clusterList := &clusterv1old.ClusterList{}
+// getAllClustersByNamespaceV1alpha3 returns the list of Cluster objects in a namespace using the older API.
+func getAllClustersByNamespaceV1alpha3(ctx context.Context, input framework.GetAllClustersByNamespaceInput) []*clusterv1alpha3.Cluster {
+	clusterList := &clusterv1alpha3.ClusterList{}
 	Expect(input.Lister.List(ctx, clusterList, client.InNamespace(input.Namespace))).To(Succeed(), "Failed to list clusters in namespace %s", input.Namespace)
 
-	clusters := make([]*clusterv1old.Cluster, len(clusterList.Items))
+	clusters := make([]*clusterv1alpha3.Cluster, len(clusterList.Items))
 	for i := range clusterList.Items {
 		clusters[i] = &clusterList.Items[i]
 	}
 	return clusters
 }
 
-// deleteClusterOldAPIInput is the input for deleteClusterOldAPI.
-type deleteClusterOldAPIInput struct {
+// deleteClusterV1alpha3Input is the input for deleteClusterV1alpha3.
+type deleteClusterV1alpha3Input struct {
 	Deleter framework.Deleter
-	Cluster *clusterv1old.Cluster
+	Cluster *clusterv1alpha3.Cluster
 }
 
-// deleteClusterOldAPI deletes the cluster and waits for everything the cluster owned to actually be gone using the older API.
-func deleteClusterOldAPI(ctx context.Context, input deleteClusterOldAPIInput) {
+// deleteClusterV1alpha3 deletes the cluster and waits for everything the cluster owned to actually be gone using the older API.
+func deleteClusterV1alpha3(ctx context.Context, input deleteClusterV1alpha3Input) {
 	By(fmt.Sprintf("Deleting cluster %s", input.Cluster.GetName()))
 	Expect(input.Deleter.Delete(ctx, input.Cluster)).To(Succeed())
 }
 
-// waitForClusterDeletedOldAPIInput is the input for waitForClusterDeletedOldAPI.
-type waitForClusterDeletedOldAPIInput struct {
+// waitForClusterDeletedV1alpha3Input is the input for waitForClusterDeletedV1alpha3.
+type waitForClusterDeletedV1alpha3Input struct {
 	Getter  framework.Getter
-	Cluster *clusterv1old.Cluster
+	Cluster *clusterv1alpha3.Cluster
 }
 
-// waitForClusterDeletedOldAPI waits until the cluster object has been deleted using the older API.
-func waitForClusterDeletedOldAPI(ctx context.Context, input waitForClusterDeletedOldAPIInput, intervals ...interface{}) {
+// waitForClusterDeletedV1alpha3 waits until the cluster object has been deleted using the older API.
+func waitForClusterDeletedV1alpha3(ctx context.Context, input waitForClusterDeletedV1alpha3Input, intervals ...interface{}) {
 	By(fmt.Sprintf("Waiting for cluster %s to be deleted", input.Cluster.GetName()))
 	Eventually(func() bool {
-		cluster := &clusterv1old.Cluster{}
+		cluster := &clusterv1alpha3.Cluster{}
 		key := client.ObjectKey{
 			Namespace: input.Cluster.GetNamespace(),
 			Name:      input.Cluster.GetName(),
 		}
 		return apierrors.IsNotFound(input.Getter.Get(ctx, key, cluster))
 	}, intervals...).Should(BeTrue())
+}
+
+// deleteAllClustersAndWaitV1alpha4 deletes all cluster resources in the given namespace and waits for them to be gone using the older API.
+func deleteAllClustersAndWaitV1alpha4(ctx context.Context, input framework.DeleteAllClustersAndWaitInput, intervals ...interface{}) {
+	Expect(ctx).NotTo(BeNil(), "ctx is required for deleteAllClustersAndWaitOldAPI")
+	Expect(input.Client).ToNot(BeNil(), "Invalid argument. input.Client can't be nil when calling deleteAllClustersAndWaitOldAPI")
+	Expect(input.Namespace).ToNot(BeEmpty(), "Invalid argument. input.Namespace can't be empty when calling deleteAllClustersAndWaitOldAPI")
+
+	clusters := getAllClustersByNamespaceV1alpha4(ctx, framework.GetAllClustersByNamespaceInput{
+		Lister:    input.Client,
+		Namespace: input.Namespace,
+	})
+
+	for _, c := range clusters {
+		deleteClusterV1alpha4(ctx, deleteClusterV1alpha4Input{
+			Deleter: input.Client,
+			Cluster: c,
+		})
+	}
+
+	for _, c := range clusters {
+		log.Logf("Waiting for the Cluster %s/%s to be deleted", c.Namespace, c.Name)
+		waitForClusterDeletedV1alpha4(ctx, waitForClusterDeletedV1alpha4Input{
+			Getter:  input.Client,
+			Cluster: c,
+		}, intervals...)
+	}
+}
+
+// getAllClustersByNamespaceV1alpha4 returns the list of Cluster objects in a namespace using the older API.
+func getAllClustersByNamespaceV1alpha4(ctx context.Context, input framework.GetAllClustersByNamespaceInput) []*clusterv1alpha4.Cluster {
+	clusterList := &clusterv1alpha4.ClusterList{}
+	Expect(input.Lister.List(ctx, clusterList, client.InNamespace(input.Namespace))).To(Succeed(), "Failed to list clusters in namespace %s", input.Namespace)
+
+	clusters := make([]*clusterv1alpha4.Cluster, len(clusterList.Items))
+	for i := range clusterList.Items {
+		clusters[i] = &clusterList.Items[i]
+	}
+	return clusters
+}
+
+// deleteClusterV1alpha4Input is the input for deleteClusterV1alpha4.
+type deleteClusterV1alpha4Input struct {
+	Deleter framework.Deleter
+	Cluster *clusterv1alpha4.Cluster
+}
+
+// deleteClusterV1alpha4 deletes the cluster and waits for everything the cluster owned to actually be gone using the older API.
+func deleteClusterV1alpha4(ctx context.Context, input deleteClusterV1alpha4Input) {
+	By(fmt.Sprintf("Deleting cluster %s", input.Cluster.GetName()))
+	Expect(input.Deleter.Delete(ctx, input.Cluster)).To(Succeed())
+}
+
+// waitForClusterDeletedV1alpha4Input is the input for waitForClusterDeletedV1alpha4.
+type waitForClusterDeletedV1alpha4Input struct {
+	Getter  framework.Getter
+	Cluster *clusterv1alpha4.Cluster
+}
+
+// waitForClusterDeletedV1alpha4 waits until the cluster object has been deleted using the older API.
+func waitForClusterDeletedV1alpha4(ctx context.Context, input waitForClusterDeletedV1alpha4Input, intervals ...interface{}) {
+	By(fmt.Sprintf("Waiting for cluster %s to be deleted", input.Cluster.GetName()))
+	Eventually(func() bool {
+		cluster := &clusterv1alpha4.Cluster{}
+		key := client.ObjectKey{
+			Namespace: input.Cluster.GetNamespace(),
+			Name:      input.Cluster.GetName(),
+		}
+		return apierrors.IsNotFound(input.Getter.Get(ctx, key, cluster))
+	}, intervals...).Should(BeTrue())
+}
+
+func matchUnstructuredLists(l1 *unstructured.UnstructuredList, l2 *unstructured.UnstructuredList) bool {
+	if l1 == nil && l2 == nil {
+		return true
+	}
+	if l1 == nil || l2 == nil {
+		return false
+	}
+	if len(l1.Items) != len(l2.Items) {
+		return false
+	}
+	s1 := sets.NewString()
+	for _, i := range l1.Items {
+		s1.Insert(types.NamespacedName{Namespace: i.GetNamespace(), Name: i.GetName()}.String())
+	}
+	s2 := sets.NewString()
+	for _, i := range l2.Items {
+		s2.Insert(types.NamespacedName{Namespace: i.GetNamespace(), Name: i.GetName()}.String())
+	}
+	return s1.Equal(s2)
 }

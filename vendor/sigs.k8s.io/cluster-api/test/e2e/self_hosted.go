@@ -18,16 +18,18 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/pointer"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/test/e2e/internal/log"
 	"sigs.k8s.io/cluster-api/test/framework"
@@ -43,10 +45,12 @@ type SelfHostedSpecInput struct {
 	BootstrapClusterProxy framework.ClusterProxy
 	ArtifactFolder        string
 	SkipCleanup           bool
+	ControlPlaneWaiters   clusterctl.ControlPlaneWaiters
 	Flavor                string
 }
 
 // SelfHostedSpec implements a test that verifies Cluster API creating a cluster, pivoting to a self-hosted cluster.
+// NOTE: This test works with Clusters with and without ClusterClass.
 func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput) {
 	var (
 		specName         = "self-hosted"
@@ -78,6 +82,7 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 	It("Should pivot the bootstrap cluster to a self-hosted cluster", func() {
 		By("Creating a workload cluster")
 
+		workloadClusterName := fmt.Sprintf("%s-%s", specName, util.RandomString(6))
 		clusterctl.ApplyClusterTemplateAndWait(ctx, clusterctl.ApplyClusterTemplateAndWaitInput{
 			ClusterProxy: input.BootstrapClusterProxy,
 			ConfigCluster: clusterctl.ConfigClusterInput{
@@ -87,11 +92,12 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 				InfrastructureProvider:   clusterctl.DefaultInfrastructureProvider,
 				Flavor:                   input.Flavor,
 				Namespace:                namespace.Name,
-				ClusterName:              fmt.Sprintf("%s-%s", specName, util.RandomString(6)),
+				ClusterName:              workloadClusterName,
 				KubernetesVersion:        input.E2EConfig.GetVariable(KubernetesVersion),
 				ControlPlaneMachineCount: pointer.Int64Ptr(1),
 				WorkerMachineCount:       pointer.Int64Ptr(1),
 			},
+			ControlPlaneWaiters:          input.ControlPlaneWaiters,
 			WaitForClusterIntervals:      input.E2EConfig.GetIntervals(specName, "wait-cluster"),
 			WaitForControlPlaneIntervals: input.E2EConfig.GetIntervals(specName, "wait-control-plane"),
 			WaitForMachineDeployments:    input.E2EConfig.GetIntervals(specName, "wait-worker-nodes"),
@@ -99,11 +105,28 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 
 		By("Turning the workload cluster into a management cluster")
 
-		// In case of the cluster id a DockerCluster, we should load controller images into the nodes.
+		// In case the cluster is a DockerCluster, we should load controller images into the nodes.
 		// Nb. this can be achieved also by changing the DockerMachine spec, but for the time being we are using
 		// this approach because this allows to have a single source of truth for images, the e2e config
+		// Nb. If the cluster is a managed topology cluster.Spec.InfrastructureRef will be nil till
+		// the cluster object is reconciled. Therefore, we always try to fetch the reconciled cluster object from
+		// the server to check if it is a DockerCluster.
 		cluster := clusterResources.Cluster
-		if cluster.Spec.InfrastructureRef.Kind == "DockerCluster" {
+		isDockerCluster := false
+		Eventually(func() error {
+			c := input.BootstrapClusterProxy.GetClient()
+			tmpCluster := &clusterv1.Cluster{}
+			if err := c.Get(ctx, client.ObjectKey{Name: cluster.Name, Namespace: cluster.Namespace}, tmpCluster); err != nil {
+				return err
+			}
+			if tmpCluster.Spec.InfrastructureRef != nil {
+				isDockerCluster = tmpCluster.Spec.InfrastructureRef.Kind == "DockerCluster"
+				return nil
+			}
+			return errors.New("cluster object not yet reconciled")
+		}, "1m", "5s").Should(Succeed())
+
+		if isDockerCluster {
 			Expect(bootstrap.LoadImagesToKindCluster(ctx, bootstrap.LoadImagesToKindClusterInput{
 				Name:   cluster.Name,
 				Images: input.E2EConfig.Images,
@@ -142,6 +165,18 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 			return selfHostedClusterProxy.GetClient().Get(ctx, client.ObjectKey{Name: "kube-system"}, kubeSystem)
 		}, "5s", "100ms").Should(BeNil(), "Failed to assert self-hosted API server stability")
 
+		// Get the machines of the workloadCluster before it is moved to become self-hosted to make sure that the move did not trigger
+		// any unexpected rollouts.
+		preMoveMachineList := &unstructured.UnstructuredList{}
+		preMoveMachineList.SetGroupVersionKind(clusterv1.GroupVersion.WithKind("MachineList"))
+		err := input.BootstrapClusterProxy.GetClient().List(
+			ctx,
+			preMoveMachineList,
+			client.InNamespace(namespace.Name),
+			client.MatchingLabels{clusterv1.ClusterLabelName: workloadClusterName},
+		)
+		Expect(err).NotTo(HaveOccurred(), "Failed to list machines before move")
+
 		By("Moving the cluster to self hosted")
 		clusterctl.Move(ctx, clusterctl.MoveInput{
 			LogFolder:            filepath.Join(input.ArtifactFolder, "clusters", "bootstrap"),
@@ -164,6 +199,20 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 			Namespace:   selfHostedCluster.Namespace,
 		})
 		Expect(controlPlane).ToNot(BeNil())
+
+		// After the move check that there were no unexpected rollouts.
+		Consistently(func() bool {
+			postMoveMachineList := &unstructured.UnstructuredList{}
+			postMoveMachineList.SetGroupVersionKind(clusterv1.GroupVersion.WithKind("MachineList"))
+			err = selfHostedClusterProxy.GetClient().List(
+				ctx,
+				postMoveMachineList,
+				client.InNamespace(namespace.Name),
+				client.MatchingLabels{clusterv1.ClusterLabelName: workloadClusterName},
+			)
+			Expect(err).NotTo(HaveOccurred(), "Failed to list machines after move")
+			return matchUnstructuredLists(preMoveMachineList, postMoveMachineList)
+		}, "3m", "30s").Should(BeTrue(), "Machines should not roll out after move to self-hosted cluster")
 
 		By("PASSED!")
 	})

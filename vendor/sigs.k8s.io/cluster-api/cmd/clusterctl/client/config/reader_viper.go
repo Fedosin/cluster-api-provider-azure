@@ -17,6 +17,7 @@ limitations under the License.
 package config
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,6 +30,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
 	"k8s.io/client-go/util/homedir"
+
 	logf "sigs.k8s.io/cluster-api/cmd/clusterctl/log"
 )
 
@@ -89,7 +91,7 @@ func (v *viperReader) Init(path string) error {
 		case url.Scheme == "https" || url.Scheme == "http":
 			configPath := filepath.Join(homedir.HomeDir(), ConfigFolder)
 			if len(v.configPaths) > 0 {
-				configPath = filepath.Join(v.configPaths[0])
+				configPath = v.configPaths[0]
 			}
 			if err := os.MkdirAll(configPath, os.ModePerm); err != nil {
 				return err
@@ -132,8 +134,10 @@ func (v *viperReader) Init(path string) error {
 }
 
 func downloadFile(url string, filepath string) error {
+	ctx := context.TODO()
+
 	// Create the file
-	out, err := os.Create(filepath)
+	out, err := os.Create(filepath) //nolint:gosec // No security issue: filepath is safe.
 	if err != nil {
 		return errors.Wrapf(err, "failed to create the clusterctl config file %s", filepath)
 	}
@@ -143,7 +147,12 @@ func downloadFile(url string, filepath string) error {
 		Timeout: 30 * time.Second,
 	}
 	// Get the data
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+	if err != nil {
+		return errors.Wrapf(err, "failed to download the clusterctl config file from %s: failed to create request", url)
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return errors.Wrapf(err, "failed to download the clusterctl config file from %s", url)
 	}

@@ -18,7 +18,7 @@ package v1beta1
 
 import clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 
-// Conditions and condition Reasons for the KubeadmControlPlane object
+// Conditions and condition Reasons for the KubeadmControlPlane object.
 
 const (
 	// MachinesReadyCondition reports an aggregate of current status of the machines controlled by the KubeadmControlPlane.
@@ -48,7 +48,7 @@ const (
 
 const (
 	// MachinesSpecUpToDateCondition documents that the spec of the machines controlled by the KubeadmControlPlane
-	// is up to date. Whe this condition is false, the KubeadmControlPlane is executing a rolling upgrade.
+	// is up to date. When this condition is false, the KubeadmControlPlane is executing a rolling upgrade.
 	MachinesSpecUpToDateCondition clusterv1.ConditionType = "MachinesSpecUpToDate"
 
 	// RollingUpdateInProgressReason (Severity=Warning) documents a KubeadmControlPlane object executing a

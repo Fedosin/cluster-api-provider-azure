@@ -20,13 +20,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"time"
 
 	. "github.com/onsi/gomega"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/config"
 	controlplanev1 "sigs.k8s.io/cluster-api/controlplane/kubeadm/api/v1beta1"
-	clusterv1exp "sigs.k8s.io/cluster-api/exp/api/v1beta1"
+	expv1 "sigs.k8s.io/cluster-api/exp/api/v1beta1"
 	"sigs.k8s.io/cluster-api/test/framework"
 	"sigs.k8s.io/cluster-api/test/framework/internal/log"
 )
@@ -184,10 +185,12 @@ type ApplyClusterTemplateAndWaitInput struct {
 	WaitForMachineDeployments    []interface{}
 	WaitForMachinePools          []interface{}
 	Args                         []string // extra args to be used during `kubectl apply`
+	PreWaitForCluster            func()
+	PostMachinesProvisioned      func()
 	ControlPlaneWaiters
 }
 
-// Waiter is a function that runs and waits for a long running operation to finish and updates the result.
+// Waiter is a function that runs and waits for a long-running operation to finish and updates the result.
 type Waiter func(ctx context.Context, input ApplyClusterTemplateAndWaitInput, result *ApplyClusterTemplateAndWaitResult)
 
 // ControlPlaneWaiters are Waiter functions for the control plane.
@@ -198,10 +201,11 @@ type ControlPlaneWaiters struct {
 
 // ApplyClusterTemplateAndWaitResult is the output type for ApplyClusterTemplateAndWait.
 type ApplyClusterTemplateAndWaitResult struct {
+	ClusterClass       *clusterv1.ClusterClass
 	Cluster            *clusterv1.Cluster
 	ControlPlane       *controlplanev1.KubeadmControlPlane
 	MachineDeployments []*clusterv1.MachineDeployment
-	MachinePools       []*clusterv1exp.MachinePool
+	MachinePools       []*expv1.MachinePool
 }
 
 // ExpectedWorkerNodes returns the expected number of worker nodes that will
@@ -269,7 +273,17 @@ func ApplyClusterTemplateAndWait(ctx context.Context, input ApplyClusterTemplate
 	Expect(workloadClusterTemplate).ToNot(BeNil(), "Failed to get the cluster template")
 
 	log.Logf("Applying the cluster template yaml to the cluster")
-	Expect(input.ClusterProxy.Apply(ctx, workloadClusterTemplate, input.Args...)).To(Succeed())
+	Eventually(func() error {
+		return input.ClusterProxy.Apply(ctx, workloadClusterTemplate, input.Args...)
+	}, 10*time.Second).Should(Succeed(), "Failed to apply the cluster template")
+
+	// Once we applied the cluster template we can run PreWaitForCluster.
+	// Note: This can e.g. be used to verify the BeforeClusterCreate lifecycle hook is executed
+	// and blocking correctly.
+	if input.PreWaitForCluster != nil {
+		log.Logf("Calling PreWaitForCluster")
+		input.PreWaitForCluster()
+	}
 
 	log.Logf("Waiting for the cluster infrastructure to be provisioned")
 	result.Cluster = framework.DiscoveryAndWaitForCluster(ctx, framework.DiscoveryAndWaitForClusterInput{
@@ -277,6 +291,14 @@ func ApplyClusterTemplateAndWait(ctx context.Context, input ApplyClusterTemplate
 		Namespace: input.ConfigCluster.Namespace,
 		Name:      input.ConfigCluster.ClusterName,
 	}, input.WaitForClusterIntervals...)
+
+	if result.Cluster.Spec.Topology != nil {
+		result.ClusterClass = framework.GetClusterClassByName(ctx, framework.GetClusterClassByNameInput{
+			Getter:    input.ClusterProxy.GetClient(),
+			Namespace: input.ConfigCluster.Namespace,
+			Name:      result.Cluster.Spec.Topology.Class,
+		})
+	}
 
 	log.Logf("Waiting for control plane to be initialized")
 	input.WaitForControlPlaneInitialized(ctx, input, result)
@@ -305,7 +327,12 @@ func ApplyClusterTemplateAndWait(ctx context.Context, input ApplyClusterTemplate
 		Getter:  input.ClusterProxy.GetClient(),
 		Lister:  input.ClusterProxy.GetClient(),
 		Cluster: result.Cluster,
-	}, input.WaitForMachineDeployments...)
+	}, input.WaitForMachinePools...)
+
+	if input.PostMachinesProvisioned != nil {
+		log.Logf("Calling PostMachinesProvisioned")
+		input.PostMachinesProvisioned()
+	}
 }
 
 // setDefaults sets the default values for ApplyClusterTemplateAndWaitInput if not set.

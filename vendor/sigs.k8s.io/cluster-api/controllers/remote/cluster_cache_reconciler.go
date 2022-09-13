@@ -22,25 +22,30 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
-	"sigs.k8s.io/cluster-api/util/predicates"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	"sigs.k8s.io/cluster-api/util/predicates"
 )
 
 // ClusterCacheReconciler is responsible for stopping remote cluster caches when
 // the cluster for the remote cache is being deleted.
 type ClusterCacheReconciler struct {
-	Log              logr.Logger
-	Client           client.Client
-	Tracker          *ClusterCacheTracker
+	// Deprecated: this field is unused and will be dropped in an upcoming release.
+	Log     logr.Logger
+	Client  client.Client
+	Tracker *ClusterCacheTracker
+
+	// WatchFilterValue is the label value used to filter events prior to reconciliation.
 	WatchFilterValue string
 }
 
 func (r *ClusterCacheReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, options controller.Options) error {
 	err := ctrl.NewControllerManagedBy(mgr).
+		Named("remote/clustercache").
 		For(&clusterv1.Cluster{}).
 		WithOptions(options).
 		WithEventFilter(predicates.ResourceHasFilterLabel(ctrl.LoggerFrom(ctx), r.WatchFilterValue)).
@@ -71,7 +76,7 @@ func (r *ClusterCacheReconciler) Reconcile(ctx context.Context, req reconcile.Re
 
 	log.V(2).Info("Cluster no longer exists")
 
-	r.Tracker.deleteAccessor(req.NamespacedName)
+	r.Tracker.deleteAccessor(ctx, req.NamespacedName)
 
 	return reconcile.Result{}, nil
 }

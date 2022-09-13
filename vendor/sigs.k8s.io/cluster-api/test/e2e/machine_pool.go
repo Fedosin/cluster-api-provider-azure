@@ -1,3 +1,4 @@
+//go:build e2e
 // +build e2e
 
 /*
@@ -26,7 +27,6 @@ import (
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/pointer"
 
@@ -35,13 +35,14 @@ import (
 	"sigs.k8s.io/cluster-api/util"
 )
 
-// MachinePoolInput is the input for MachinePoolSpec
+// MachinePoolInput is the input for MachinePoolSpec.
 type MachinePoolInput struct {
 	E2EConfig             *clusterctl.E2EConfig
 	ClusterctlConfigPath  string
 	BootstrapClusterProxy framework.ClusterProxy
 	ArtifactFolder        string
 	SkipCleanup           bool
+	ControlPlaneWaiters   clusterctl.ControlPlaneWaiters
 
 	// Flavor, if specified must refer to a template that contains a MachinePool resource.
 	// If not specified, "machine-pool" is used
@@ -64,7 +65,7 @@ func MachinePoolSpec(ctx context.Context, inputGetter func() MachinePoolInput) {
 		Expect(input.E2EConfig).ToNot(BeNil(), "Invalid argument. input.E2EConfig can't be nil when calling %s spec", specName)
 		Expect(input.ClusterctlConfigPath).To(BeAnExistingFile(), "Invalid argument. input.ClusterctlConfigPath must be an existing file when calling %s spec", specName)
 		Expect(input.BootstrapClusterProxy).ToNot(BeNil(), "Invalid argument. input.BootstrapClusterProxy can't be nil when calling %s spec", specName)
-		Expect(os.MkdirAll(input.ArtifactFolder, 0755)).To(Succeed(), "Invalid argument. input.ArtifactFolder can't be created for %s spec", specName)
+		Expect(os.MkdirAll(input.ArtifactFolder, 0755)).To(Succeed(), "Invalid argument. input.ArtifactFolder can't be created for %s spec", specName) //nolint:gosec
 		Expect(input.E2EConfig.Variables).To(HaveKey(KubernetesVersion))
 		Expect(input.E2EConfig.Variables).To(HaveValidVersion(input.E2EConfig.GetVariable(KubernetesVersion)))
 
@@ -90,6 +91,7 @@ func MachinePoolSpec(ctx context.Context, inputGetter func() MachinePoolInput) {
 				ControlPlaneMachineCount: pointer.Int64Ptr(1),
 				WorkerMachineCount:       pointer.Int64Ptr(int64(workerMachineCount)),
 			},
+			ControlPlaneWaiters:          input.ControlPlaneWaiters,
 			WaitForClusterIntervals:      input.E2EConfig.GetIntervals(specName, "wait-cluster"),
 			WaitForControlPlaneIntervals: input.E2EConfig.GetIntervals(specName, "wait-control-plane"),
 			WaitForMachinePools:          input.E2EConfig.GetIntervals(specName, "wait-machine-pool-nodes"),
@@ -109,6 +111,15 @@ func MachinePoolSpec(ctx context.Context, inputGetter func() MachinePoolInput) {
 			ClusterProxy:              input.BootstrapClusterProxy,
 			Cluster:                   clusterResources.Cluster,
 			Replicas:                  workerMachineCount - 1,
+			MachinePools:              clusterResources.MachinePools,
+			WaitForMachinePoolToScale: input.E2EConfig.GetIntervals(specName, "wait-machine-pool-nodes"),
+		})
+
+		By("Scaling the machine pool to zero")
+		framework.ScaleMachinePoolAndWait(ctx, framework.ScaleMachinePoolAndWaitInput{
+			ClusterProxy:              input.BootstrapClusterProxy,
+			Cluster:                   clusterResources.Cluster,
+			Replicas:                  0,
 			MachinePools:              clusterResources.MachinePools,
 			WaitForMachinePoolToScale: input.E2EConfig.GetIntervals(specName, "wait-machine-pool-nodes"),
 		})

@@ -37,14 +37,27 @@ help:  ## Display this help
 TOOLS_DIR := $(REPO_ROOT)/hack/tools
 BIN_DIR := bin
 TOOLS_BIN_DIR := $(TOOLS_DIR)/$(BIN_DIR)
-GINKGO := $(TOOLS_BIN_DIR)/ginkgo
-KUSTOMIZE := $(TOOLS_BIN_DIR)/kustomize
+GINGKO_VER := v1.16.5
+GINKGO_BIN := ginkgo
+GINKGO := $(abspath $(TOOLS_BIN_DIR)/$(GINKGO_BIN)-$(GINGKO_VER))
+GINKGO_PKG := github.com/onsi/ginkgo/ginkgo
+GO_INSTALL := $(REPO_ROOT)/scripts/go_install.sh
+KUSTOMIZE_BIN := kustomize
+KUSTOMIZE_VER := $(shell grep "^KUSTOMIZE_VER" $(REPO_ROOT)/Makefile | awk '{print $$NF}')
+KUSTOMIZE := $(abspath $(TOOLS_BIN_DIR)/$(KUSTOMIZE_BIN)-$(KUSTOMIZE_VER))
+KUSTOMIZE_PKG := sigs.k8s.io/kustomize/kustomize/v4
 
 $(GINKGO): # Build ginkgo from tools folder.
-	cd $(TOOLS_DIR) && go build -tags=tools -o $(BIN_DIR)/ginkgo github.com/onsi/ginkgo/ginkgo
+	GOBIN=$(TOOLS_BIN_DIR) $(GO_INSTALL) $(GINKGO_PKG) $(GINKGO_BIN) $(GINGKO_VER)
 
 $(KUSTOMIZE): # Build kustomize from tools folder.
-	$(REPO_ROOT)/hack/ensure-kustomize.sh
+	GOBIN=$(TOOLS_BIN_DIR) $(GO_INSTALL) $(KUSTOMIZE_PKG) $(KUSTOMIZE_BIN) $(KUSTOMIZE_VER)
+
+.PHONY: $(GINKGO_BIN)
+$(GINKGO_BIN): $(GINKGO) ## Build a local copy of ginkgo
+
+.PHONY: $(KUSTOMIZE_BIN)
+$(KUSTOMIZE_BIN): $(KUSTOMIZE) ## Build a local copy of kustomize
 
 ## --------------------------------------
 ## Templates
@@ -56,33 +69,42 @@ DOCKER_TEMPLATES := $(REPO_ROOT)/test/e2e/data/infrastructure-docker
 cluster-templates: $(KUSTOMIZE) cluster-templates-v1alpha3 cluster-templates-v1alpha4 cluster-templates-v1beta1 ## Generate cluster templates for all versions
 
 cluster-templates-v1alpha3: $(KUSTOMIZE) ## Generate cluster templates for v1alpha3
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha3/cluster-template --load_restrictor none > $(DOCKER_TEMPLATES)/v1alpha3/cluster-template.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha3/cluster-template --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1alpha3/cluster-template.yaml
 
 cluster-templates-v1alpha4: $(KUSTOMIZE) ## Generate cluster templates for v1alpha4
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template --load_restrictor none > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-md-remediation --load_restrictor none > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-md-remediation.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-remediation --load_restrictor none > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-remediation.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-adoption/step1 --load_restrictor none > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-adoption.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-md-remediation --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-md-remediation.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-remediation --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-remediation.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-adoption/step1 --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-adoption.yaml
 	echo "---" >> $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-adoption.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-adoption/step2 --load_restrictor none >> $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-adoption.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-machine-pool --load_restrictor none > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-machine-pool.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-node-drain --load_restrictor none > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-node-drain.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-upgrades --load_restrictor none > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-upgrades.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-scale-in --load_restrictor none > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-scale-in.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-ipv6 --load_restrictor none > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-ipv6.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-adoption/step2 --load-restrictor LoadRestrictionsNone >> $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-adoption.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-machine-pool --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-machine-pool.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-node-drain --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-node-drain.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-upgrades --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-upgrades.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-scale-in --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-kcp-scale-in.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-ipv6 --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1alpha4/cluster-template-ipv6.yaml
 
 cluster-templates-v1beta1: $(KUSTOMIZE) ## Generate cluster templates for v1beta1
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template --load_restrictor none > $(DOCKER_TEMPLATES)/v1beta1/cluster-template.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-md-remediation --load_restrictor none > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-md-remediation.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-remediation --load_restrictor none > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-remediation.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-adoption/step1 --load_restrictor none > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-adoption.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1beta1/cluster-template.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-md-remediation --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-md-remediation.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-remediation --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-remediation.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-adoption/step1 --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-adoption.yaml
 	echo "---" >> $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-adoption.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-adoption/step2 --load_restrictor none >> $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-adoption.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-machine-pool --load_restrictor none > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-machine-pool.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-node-drain --load_restrictor none > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-node-drain.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-upgrades --load_restrictor none > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-upgrades.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-scale-in --load_restrictor none > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-scale-in.yaml
-	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-ipv6 --load_restrictor none > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-ipv6.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-adoption/step2 --load-restrictor LoadRestrictionsNone >> $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-adoption.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-machine-pool --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-machine-pool.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-node-drain --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-node-drain.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-upgrades --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-upgrades.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-upgrades-cgroupfs --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-upgrades-cgroupfs.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-upgrades-runtimesdk --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-upgrades-runtimesdk.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-upgrades-runtimesdk-cgroupfs --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-upgrades-runtimesdk-cgroupfs.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-scale-in --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-kcp-scale-in.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-ipv6 --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-ipv6.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-topology --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-topology.yaml
+	$(KUSTOMIZE) build $(DOCKER_TEMPLATES)/v1beta1/cluster-template-ignition --load-restrictor LoadRestrictionsNone > $(DOCKER_TEMPLATES)/v1beta1/cluster-template-ignition.yaml
+
+test-extension-deployment: $(KUSTOMIZE) ## Generate deployment for test extension
+	mkdir -p $(REPO_ROOT)/test/e2e/data/test-extension
+	$(KUSTOMIZE) build $(REPO_ROOT)/test/extension/config/default > $(REPO_ROOT)/test/e2e/data/test-extension/deployment.yaml
 
 ## --------------------------------------
 ## Testing
@@ -103,7 +125,7 @@ _SKIP_ARGS := $(foreach arg,$(strip $(GINKGO_SKIP)),-skip="$(arg)")
 endif
 
 .PHONY: run
-run: $(GINKGO) cluster-templates ## Run the end-to-end tests
+run: $(GINKGO) cluster-templates test-extension-deployment ## Run the end-to-end tests
 	$(GINKGO) -v -trace -tags=e2e -focus="$(GINKGO_FOCUS)" $(_SKIP_ARGS) -nodes=$(GINKGO_NODES) --noColor=$(GINKGO_NOCOLOR) $(GINKGO_ARGS) . -- \
 	    -e2e.artifacts-folder="$(ARTIFACTS)" \
 	    -e2e.config="$(E2E_CONF_FILE)" \

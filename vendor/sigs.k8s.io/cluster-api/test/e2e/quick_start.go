@@ -24,7 +24,6 @@ import (
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/pointer"
 
@@ -40,6 +39,7 @@ type QuickStartSpecInput struct {
 	BootstrapClusterProxy framework.ClusterProxy
 	ArtifactFolder        string
 	SkipCleanup           bool
+	ControlPlaneWaiters   clusterctl.ControlPlaneWaiters
 
 	// Flavor, if specified is the template flavor used to create the cluster for testing.
 	// If not specified, and the e2econfig variable IPFamily is IPV6, then "ipv6" is used,
@@ -50,6 +50,7 @@ type QuickStartSpecInput struct {
 // QuickStartSpec implements a spec that mimics the operation described in the Cluster API quick start, that is
 // creating a workload cluster.
 // This test is meant to provide a first, fast signal to detect regression; it is recommended to use it as a PR blocker test.
+// NOTE: This test works with Clusters with and without ClusterClass.
 func QuickStartSpec(ctx context.Context, inputGetter func() QuickStartSpecInput) {
 	var (
 		specName         = "quick-start"
@@ -77,9 +78,9 @@ func QuickStartSpec(ctx context.Context, inputGetter func() QuickStartSpecInput)
 	It("Should create a workload cluster", func() {
 		By("Creating a workload cluster")
 
-		defaultFlavor := clusterctl.DefaultFlavor
-		if input.E2EConfig.GetVariable(IPFamily) == "IPv6" {
-			defaultFlavor = "ipv6"
+		flavor := clusterctl.DefaultFlavor
+		if input.Flavor != nil {
+			flavor = *input.Flavor
 		}
 
 		clusterctl.ApplyClusterTemplateAndWait(ctx, clusterctl.ApplyClusterTemplateAndWaitInput{
@@ -89,13 +90,14 @@ func QuickStartSpec(ctx context.Context, inputGetter func() QuickStartSpecInput)
 				ClusterctlConfigPath:     input.ClusterctlConfigPath,
 				KubeconfigPath:           input.BootstrapClusterProxy.GetKubeconfigPath(),
 				InfrastructureProvider:   clusterctl.DefaultInfrastructureProvider,
-				Flavor:                   pointer.StringDeref(input.Flavor, defaultFlavor),
+				Flavor:                   flavor,
 				Namespace:                namespace.Name,
 				ClusterName:              fmt.Sprintf("%s-%s", specName, util.RandomString(6)),
 				KubernetesVersion:        input.E2EConfig.GetVariable(KubernetesVersion),
 				ControlPlaneMachineCount: pointer.Int64Ptr(1),
 				WorkerMachineCount:       pointer.Int64Ptr(1),
 			},
+			ControlPlaneWaiters:          input.ControlPlaneWaiters,
 			WaitForClusterIntervals:      input.E2EConfig.GetIntervals(specName, "wait-cluster"),
 			WaitForControlPlaneIntervals: input.E2EConfig.GetIntervals(specName, "wait-control-plane"),
 			WaitForMachineDeployments:    input.E2EConfig.GetIntervals(specName, "wait-worker-nodes"),
